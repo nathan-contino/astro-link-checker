@@ -6,6 +6,9 @@
   "author": "Nathan Contino <ncontino@lambdalatitudinarians.org>",
   "license": "MIT",
   "keywords": ["astro", "astro-integration", "link-checker", "broken-links"],
+  "scripts": {
+    "test": "node --test test/test.mjs"
+  },
   "exports": {
     ".": "./index.mjs"
   },
