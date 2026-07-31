@@ -6,7 +6,7 @@ External links are not checked. For those, point a tool like [lychee](https://gi
 
 ## Why faster
 
-The common approach checks links per-file: if `/docs/get-started` is linked from 400 pages, it gets stat'd 400 times. This plugin deduplicates first — every unique destination is checked exactly once, regardless of how many pages reference it. File reads and existence checks all run in parallel.
+The common approach checks links per-file: if `/docs/get-started` is linked from 400 pages, it gets stat'd 400 times. This plugin deduplicates first, checking every unique destination exactly once regardless of how many pages reference it. File reads and existence checks all run in parallel.
 
 ## Installation
 
@@ -69,6 +69,6 @@ On failure:
 
 ## Notes
 
-- Only `href` attributes are checked — `src` (images, scripts) is not checked in v1.
-- Anchor fragments (`#section`) are stripped before checking; whether the anchor actually exists on the target page is not verified.
-- Relative hrefs are resolved against their source file's location and normalized to root-relative paths before deduplication and matching.
+- Only checks `href` attributes.
+- Strips anchor fragments (`#section`) before checking, so this tool has no clue whether the anchor actually exists on the target page.
+- Resolves relative hrefs against their source file's location and normalizes them to root-relative paths before deduplication and matching.
