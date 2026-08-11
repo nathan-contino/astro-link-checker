@@ -10,7 +10,7 @@ The common approach checks links per-file: if `/docs/get-started` is linked from
 
 ## Installation
 
-```
+```shell-session
 npm install astro-link-checker
 ```
 
@@ -69,6 +69,6 @@ On failure:
 
 ## Notes
 
-- Only checks `href` attributes.
-- Strips anchor fragments (`#section`) before checking, so this tool has no clue whether the anchor actually exists on the target page.
-- Resolves relative hrefs against their source file's location and normalizes them to root-relative paths before deduplication and matching.
+- Only checks `href` attributes, skips `src` (images, scripts).
+- Strips anchor fragments (`#section`) before checking; does not verify whether the anchor actually exists on the target page.
+- Resolves relative hrefs against their source file's location and normalized to root-relative paths before deduplication and matching.
