@@ -23,13 +23,14 @@
  * Options:
  *   excludeSourcePages    {(string|RegExp)[]}  skip pages whose URL path matches
  *   excludeDestinations   {(string|RegExp)[]}  skip destinations whose path matches
- *   failOnBrokenLinks     {boolean}            throw on any broken link (default: true)
+ *   failOnBrokenLinks     {boolean}            exit 1 on any broken link (default: true)
  *   verbose               {boolean}            log every checked href (default: false)
  */
 
 import { readdir, readFile, access } from 'node:fs/promises';
 import { join, resolve, relative, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import process from 'node:process';
 
 // Concurrency pool: runs at most `limit` tasks simultaneously.
 function makePool(limit) {
@@ -205,8 +206,8 @@ export default function linkChecker(opts = {}) {
           .join('\n');
 
         const msg = `[link-checker] ${broken.length} broken link${broken.length === 1 ? '' : 's'}:\n${report}`;
-        if (failOnBrokenLinks) throw new Error(msg);
-        else log(msg);
+        log(msg);
+        if (failOnBrokenLinks) process.exit(1);
       },
     },
   };
