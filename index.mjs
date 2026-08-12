@@ -45,9 +45,9 @@ function makePool(limit) {
   return fn => new Promise((res, rej) => { queue.push({ fn, res, rej }); flush(); });
 }
 
-// Test a value against an array of strings (substring match) or RegExps.
+// Test a value against an array of strings (prefix match) or RegExps.
 function matches(value, patterns) {
-  return patterns.some(p => p instanceof RegExp ? p.test(value) : value.includes(String(p)));
+  return patterns.some(p => p instanceof RegExp ? p.test(value) : value.startsWith(String(p)));
 }
 
 // Walk a directory tree in parallel, collecting .html file paths.

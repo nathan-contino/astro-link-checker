@@ -30,10 +30,10 @@ export default defineConfig({
 
 ```ts
 linkChecker({
-  // Pages to skip crawling entirely (matched against the page's URL path)
+  // Pages to skip crawling entirely (string = prefix match, RegExp = tested against full path)
   excludeSourcePages: ['/landing/', /^\/preview\//],
 
-  // Destinations to skip checking (matched against the normalized root-relative href)
+  // Destinations to skip checking (string = prefix match, RegExp = tested against full path)
   excludeDestinations: ['/login', '/logout', /^\/external-tool\//],
 
   // Throw and fail the build on broken links (default: true)
@@ -44,7 +44,20 @@ linkChecker({
 })
 ```
 
-Both `excludeSourcePages` and `excludeDestinations` accept an array of strings (substring match) or `RegExp` objects (tested against the full path).
+Both `excludeSourcePages` and `excludeDestinations` accept an array of strings or `RegExp` objects:
+
+- Strings match by prefix: e.g. `'/login'` excludes any path that _starts with_ `/login`, such as `/login`, `/login/callback`, or `/login?next=/docs`. This is equivalent to the regex `/^\/login/`.
+- RegExps match against the full path: use regex for patterns that don't anchor at the start, or for precise end-to-end matches.
+
+```ts
+excludeDestinations: [
+  '/login',           // prefix: skips /login, /login/callback, /login?next=…
+  '/external-tool/',  // prefix: skips /external-tool/ and everything beneath it
+  /\/beta\//,         // regex: skips any path containing /beta/ (not anchored)
+  /\.(pdf|zip)$/,     // regex: skips paths ending in .pdf or .zip
+  /^\/exact-path$/,   // regex: skips only the exact path /exact-path
+]
+```
 
 ## Output
 
