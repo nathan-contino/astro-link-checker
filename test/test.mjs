@@ -28,9 +28,14 @@ async function makeFixture(files) {
 }
 
 // Run the integration hook and collect log lines + any thrown error.
+// _exit is injected so failOnBrokenLinks:true is testable without killing the process.
 async function run(tmpDir, opts = {}) {
-  const integration = linkChecker({ failOnBrokenLinks: false, ...opts });
   const logs = [];
+  const integration = linkChecker({
+    failOnBrokenLinks: false,
+    ...opts,
+    _exit: () => { throw new Error(logs[logs.length - 1] ?? 'exit'); },
+  });
   const logger = { info: msg => logs.push(msg) };
   let threw = null;
   try {

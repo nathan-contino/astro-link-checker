@@ -34,6 +34,7 @@
 import { readdir, readFile, access } from 'node:fs/promises';
 import { join, resolve, relative, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import process from 'node:process';
 
 // Concurrency pool: runs at most `limit` tasks simultaneously.
 function makePool(limit) {
@@ -168,6 +169,7 @@ export default function linkChecker(opts = {}) {
     failOnBrokenLinks   = true,
     checkAnchors        = true,
     verbose             = false,
+    _exit               = process.exit,
   } = opts;
 
   return {
@@ -295,7 +297,7 @@ export default function linkChecker(opts = {}) {
 
         const msg = `[link-checker] ${broken.length} broken link${broken.length === 1 ? '' : 's'}:\n${report}`;
         log(msg);
-        if (failOnBrokenLinks) throw new Error(msg);
+        if (failOnBrokenLinks) _exit(1);
       },
     },
   };
