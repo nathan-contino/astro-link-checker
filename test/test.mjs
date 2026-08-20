@@ -10,6 +10,12 @@ import linkChecker from '../index.mjs';
 const page = (...hrefs) =>
   `<!doctype html><html><body>${hrefs.map(h => `<a href="${h}">x</a>`).join('')}</body></html>`;
 
+// Build a page with explicit id anchors.
+const pageWithIds = (ids, ...hrefs) => {
+  const anchors = ids.map(id => `<h2 id="${id}">${id}</h2>`).join('');
+  return `<!doctype html><html><body>${anchors}${hrefs.map(h => `<a href="${h}">x</a>`).join('')}</body></html>`;
+};
+
 // Create a temp directory populated with { 'rel/path.html': content } entries.
 async function makeFixture(files) {
   const tmp = await mkdtemp(join(tmpdir(), 'alc-test-'));
@@ -43,7 +49,7 @@ async function run(tmpDir, opts = {}) {
 const lastLog = r => r.logs[r.logs.length - 1];
 const isBroken = (r, href) => r.logs.some(l => l.includes(href));
 
-// ── tests ────────────────────────────────────────────────────────────────────
+// ── page link tests ──────────────────────────────────────────────────────────
 
 test('all valid links → passes cleanly', async () => {
   const tmp = await makeFixture({
@@ -186,29 +192,6 @@ test('external http:// links → not checked, not reported', async () => {
   } finally { await rm(tmp, { recursive: true }); }
 });
 
-test('fragment-only links → not checked', async () => {
-  const tmp = await makeFixture({
-    'index.html': page('#intro', '#nowhere-that-exists'),
-  });
-  try {
-    const r = await run(tmp);
-    assert.equal(r.threw, null);
-    assert.ok(lastLog(r).includes('all links ok'), 'fragment links should be skipped');
-  } finally { await rm(tmp, { recursive: true }); }
-});
-
-test('fragment stripped from internal href before checking', async () => {
-  const tmp = await makeFixture({
-    'index.html': page('/about#team', '/about#history'),
-    'about.html': page('/'),
-  });
-  try {
-    const r = await run(tmp);
-    assert.equal(r.threw, null);
-    assert.ok(lastLog(r).includes('all links ok'), '/about#section should resolve to about.html');
-  } finally { await rm(tmp, { recursive: true }); }
-});
-
 test('percent-encoded external URL embedded in path → skipped', async () => {
   // Malformed link where [https://... got URL-encoded into a path segment.
   const tmp = await makeFixture({
@@ -283,5 +266,138 @@ test('verbose mode → logs every checked href', async () => {
     const r = await run(tmp, { verbose: true });
     const checkLogs = r.logs.filter(l => l.includes('✓') || l.includes('✗'));
     assert.ok(checkLogs.length > 0, 'verbose mode should log individual checks');
+  } finally { await rm(tmp, { recursive: true }); }
+});
+
+// ── anchor tests ──────────────────────────────────────────────────────────────
+
+test('fragment-only links: no ids on page → broken', async () => {
+  const tmp = await makeFixture({
+    'index.html': page('#nowhere'),
+  });
+  try {
+    const r = await run(tmp);
+    assert.ok(isBroken(r, '/#nowhere'), 'same-page anchor should be checked and reported broken');
+  } finally { await rm(tmp, { recursive: true }); }
+});
+
+test('fragment-only links: matching id on page → ok', async () => {
+  const tmp = await makeFixture({
+    'index.html': pageWithIds(['intro'], '#intro'),
+  });
+  try {
+    const r = await run(tmp);
+    assert.equal(r.threw, null);
+    assert.ok(lastLog(r).includes('all links ok'), '#intro exists on the page, should pass');
+  } finally { await rm(tmp, { recursive: true }); }
+});
+
+test('cross-page anchor: matching id on target → ok', async () => {
+  const tmp = await makeFixture({
+    'index.html': page('/about#team', '/about#history'),
+    'about.html': pageWithIds(['team', 'history']),
+  });
+  try {
+    const r = await run(tmp);
+    assert.equal(r.threw, null);
+    assert.ok(lastLog(r).includes('all links ok'), '/about#team and /about#history should pass');
+  } finally { await rm(tmp, { recursive: true }); }
+});
+
+test('cross-page anchor: missing id on target → broken', async () => {
+  const tmp = await makeFixture({
+    'index.html': page('/about#team'),
+    'about.html': page('/'),
+  });
+  try {
+    const r = await run(tmp);
+    assert.ok(isBroken(r, '/about#team'), '/about#team should be flagged (no id="team" on about page)');
+  } finally { await rm(tmp, { recursive: true }); }
+});
+
+test('anchor on missing page → page error reported, anchor not double-reported', async () => {
+  const tmp = await makeFixture({
+    'index.html': page('/gone#section'),
+  });
+  try {
+    const r = await run(tmp);
+    // /gone should be reported as a broken page
+    assert.ok(isBroken(r, '/gone'), '/gone page should be reported as broken');
+    // /gone#section should NOT be separately reported (page already missing)
+    assert.ok(!isBroken(r, '/gone#section'), '/gone#section should not be double-reported');
+  } finally { await rm(tmp, { recursive: true }); }
+});
+
+test('checkAnchors: false → fragment-only links not checked', async () => {
+  const tmp = await makeFixture({
+    'index.html': page('#nowhere-that-exists'),
+  });
+  try {
+    const r = await run(tmp, { checkAnchors: false });
+    assert.equal(r.threw, null);
+    assert.ok(lastLog(r).includes('all links ok'), 'fragment links should be skipped when checkAnchors is false');
+  } finally { await rm(tmp, { recursive: true }); }
+});
+
+test('checkAnchors: false → cross-page anchors not checked', async () => {
+  const tmp = await makeFixture({
+    'index.html': page('/about#team', '/about#history'),
+    'about.html': page('/'),
+  });
+  try {
+    const r = await run(tmp, { checkAnchors: false });
+    assert.equal(r.threw, null);
+    assert.ok(lastLog(r).includes('all links ok'), '/about#section should not be checked when checkAnchors is false');
+  } finally { await rm(tmp, { recursive: true }); }
+});
+
+test('legacy <a name="..."> anchors are valid targets', async () => {
+  const tmp = await makeFixture({
+    'index.html': page('/about#legacy'),
+    'about.html': `<!doctype html><html><body><a name="legacy">section</a></body></html>`,
+  });
+  try {
+    const r = await run(tmp);
+    assert.equal(r.threw, null);
+    assert.ok(lastLog(r).includes('all links ok'), '<a name="legacy"> should count as a valid anchor target');
+  } finally { await rm(tmp, { recursive: true }); }
+});
+
+test('anchor in excluded destination → not checked', async () => {
+  const tmp = await makeFixture({
+    'index.html': page('/login#form'),
+  });
+  try {
+    const r = await run(tmp, {
+      excludeDestinations: ['/login'],
+    });
+    assert.equal(r.threw, null);
+    assert.ok(lastLog(r).includes('all links ok'), '/login#form should be skipped (destination excluded)');
+  } finally { await rm(tmp, { recursive: true }); }
+});
+
+test('anchor on excluded source page → not checked', async () => {
+  const tmp = await makeFixture({
+    'landing/promo.html': page('/about#team'),
+    'about.html': page('/'),
+  });
+  try {
+    const r = await run(tmp, {
+      excludeSourcePages: ['/landing/'],
+    });
+    assert.equal(r.threw, null);
+    assert.ok(lastLog(r).includes('all links ok'), 'anchor on excluded source page should not be checked');
+  } finally { await rm(tmp, { recursive: true }); }
+});
+
+test('verbose mode → logs anchor checks', async () => {
+  const tmp = await makeFixture({
+    'index.html': page('#intro'),
+    'about.html': pageWithIds(['team'], '/about#team'),
+  });
+  try {
+    const r = await run(tmp, { verbose: true });
+    const anchorLogs = r.logs.filter(l => (l.includes('✓') || l.includes('✗')) && l.includes('#'));
+    assert.ok(anchorLogs.length > 0, 'verbose mode should log anchor checks');
   } finally { await rm(tmp, { recursive: true }); }
 });

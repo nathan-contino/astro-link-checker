@@ -1,15 +1,18 @@
 /**
  * astro-link-checker
  *
- * Fast intra-site broken link checker for Astro. Runs after build.
+ * Fast intra-site broken link and anchor checker for Astro. Runs after build.
  *
  * Algorithm:
  *   1. Walk the build output directory in parallel to collect all .html files.
- *   2. Read all files concurrently and extract href attributes via regex.
- *   3. Deduplicate: build a Map<normalizedHref, Set<sourceUrl>>.
+ *   2. Read all files concurrently; extract href attributes and id attributes.
+ *   3. Build linkMap<normalizedPath, Set<sourceUrl>>,
+ *      fragmentMap<targetUrlPath, Map<fragment, Set<sourceUrl>>>,
+ *      and idCache<urlPath, Set<id>>.
  *      A destination linked from 500 pages is stat'd exactly once.
- *   4. Check all unique destinations in parallel with fs.access.
- *   5. Report broken links grouped by destination, with source pages listed.
+ *   4. Check all unique path destinations in parallel with fs.access.
+ *   5. Check all anchor fragments against idCache.
+ *   6. Report broken links and anchors grouped by destination.
  *
  * External links are not checked. Use a dedicated HTTP checker for those.
  *
@@ -23,14 +26,14 @@
  * Options:
  *   excludeSourcePages    {(string|RegExp)[]}  skip pages whose URL path matches
  *   excludeDestinations   {(string|RegExp)[]}  skip destinations whose path matches
- *   failOnBrokenLinks     {boolean}            exit 1 on any broken link (default: true)
+ *   failOnBrokenLinks     {boolean}            throw on any broken link (default: true)
+ *   checkAnchors          {boolean}            validate #fragment targets (default: true)
  *   verbose               {boolean}            log every checked href (default: false)
  */
 
 import { readdir, readFile, access } from 'node:fs/promises';
 import { join, resolve, relative, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import process from 'node:process';
 
 // Concurrency pool: runs at most `limit` tasks simultaneously.
 function makePool(limit) {
@@ -92,11 +95,29 @@ function extractHrefs(html) {
   return hrefs;
 }
 
-// Normalize an href to a root-relative path, or null if it should be skipped.
+// Extract all id attribute values and legacy <a name="..."> anchors from HTML.
+function extractIds(html) {
+  const stripped = html
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '');
+  const ids = new Set();
+  const reId = /\bid=(["'])([^"']{1,512}?)\1/gi;
+  let m;
+  while ((m = reId.exec(stripped)) !== null) ids.add(m[2]);
+  // legacy <a name="..."> anchors
+  const reName = /<a\b[^>]*\bname=(["'])([^"']{1,512}?)\1/gi;
+  while ((m = reName.exec(stripped)) !== null) ids.add(m[2]);
+  return ids;
+}
+
+// Normalize an href to {path, fragment} or null if it should be skipped.
+// path is the root-relative page path, or null for fragment-only links (current page).
+// fragment is the #anchor string without the leading '#', or null if no fragment.
 function normalizeHref(href, htmlFile, buildDir) {
   if (!href) return null;
-  // Skip external, fragment-only, and special-scheme links.
-  if (/^(?:#|https?:\/\/|\/\/|mailto:|tel:|javascript:|data:)/i.test(href)) return null;
+  // Skip external and special-scheme links entirely.
+  if (/^(?:https?:\/\/|\/\/|mailto:|tel:|javascript:|data:)/i.test(href)) return null;
 
   // URL-decode and re-check — catches malformed links where an external URL was
   // percent-encoded into a path, e.g. /page/%5Bhttps:/example.com
@@ -106,16 +127,25 @@ function normalizeHref(href, htmlFile, buildDir) {
   // Decoded brackets or pipes indicate a malformed link, not a real path.
   if (/[[\]|\\]/.test(decoded)) return null;
 
+  const hashIdx = href.indexOf('#');
+  const fragment = hashIdx >= 0 ? href.slice(hashIdx + 1).split('?')[0] || null : null;
   const bare = href.split('#')[0].split('?')[0];
-  if (!bare) return null;
 
-  if (bare.startsWith('/')) return bare;
+  // Fragment-only link — target path is resolved by caller to the current page.
+  if (!bare) return fragment ? { path: null, fragment } : null;
 
-  // Relative href — resolve against the file's location, then make root-relative.
-  const abs = resolve(dirname(htmlFile), bare);
-  const rel = relative(buildDir, abs).replace(/\\/g, '/');
-  if (rel.startsWith('..')) return null; // outside build dir
-  return '/' + rel;
+  let path;
+  if (bare.startsWith('/')) {
+    path = bare;
+  } else {
+    // Relative href — resolve against the file's location, then make root-relative.
+    const abs = resolve(dirname(htmlFile), bare);
+    const rel = relative(buildDir, abs).replace(/\\/g, '/');
+    if (rel.startsWith('..')) return null; // outside build dir
+    path = '/' + rel;
+  }
+
+  return { path, fragment };
 }
 
 // Check whether a root-relative path resolves to any real file in the build output.
@@ -136,6 +166,7 @@ export default function linkChecker(opts = {}) {
     excludeSourcePages  = [],
     excludeDestinations = [],
     failOnBrokenLinks   = true,
+    checkAnchors        = true,
     verbose             = false,
   } = opts;
 
@@ -151,9 +182,13 @@ export default function linkChecker(opts = {}) {
         const htmlFiles = await walkHtml(buildDir);
         log(`[link-checker] ${htmlFiles.length} HTML files`);
 
-        // Phase 2: extract and deduplicate hrefs across all pages.
-        // linkMap: normalizedHref → Set of source URL paths that reference it.
-        const linkMap = new Map();
+        // Phase 2: extract hrefs, fragments, and ids across all pages.
+        // linkMap:     normPath    → Set<sourceUrlPath>
+        // fragmentMap: targetPath  → Map<fragment, Set<sourceUrlPath>>
+        // idCache:     urlPath     → Set<id>
+        const linkMap     = new Map();
+        const fragmentMap = new Map();
+        const idCache     = new Map();
         const pool = makePool(200);
 
         await Promise.all(
@@ -163,13 +198,31 @@ export default function linkChecker(opts = {}) {
               if (matches(urlPath, excludeSourcePages)) return;
 
               const html = await readFile(file, 'utf-8');
+              if (checkAnchors) idCache.set(urlPath, extractIds(html));
+
               for (const raw of extractHrefs(html)) {
-                const norm = normalizeHref(raw, file, buildDir);
-                if (!norm) continue;
-                if (matches(norm, excludeDestinations)) continue;
-                let sources = linkMap.get(norm);
-                if (!sources) { sources = new Set(); linkMap.set(norm, sources); }
-                sources.add(urlPath);
+                const result = normalizeHref(raw, file, buildDir);
+                if (!result) continue;
+
+                const { path: normPath, fragment } = result;
+                // Fragment-only links resolve to the current page.
+                const resolvedPath = normPath ?? urlPath;
+
+                if (matches(resolvedPath, excludeDestinations)) continue;
+
+                if (normPath !== null) {
+                  let sources = linkMap.get(normPath);
+                  if (!sources) { sources = new Set(); linkMap.set(normPath, sources); }
+                  sources.add(urlPath);
+                }
+
+                if (fragment !== null && checkAnchors) {
+                  let fragsByPath = fragmentMap.get(resolvedPath);
+                  if (!fragsByPath) { fragsByPath = new Map(); fragmentMap.set(resolvedPath, fragsByPath); }
+                  let fragSources = fragsByPath.get(fragment);
+                  if (!fragSources) { fragSources = new Set(); fragsByPath.set(fragment, fragSources); }
+                  fragSources.add(urlPath);
+                }
               }
             })
           )
@@ -178,7 +231,7 @@ export default function linkChecker(opts = {}) {
         const uniqueCount = linkMap.size;
         log(`[link-checker] ${uniqueCount} unique destinations`);
 
-        // Phase 3: check every unique destination exactly once.
+        // Phase 3: check every unique path destination exactly once.
         const broken = [];
         await Promise.all(
           [...linkMap.entries()].map(async ([norm, sources]) => {
@@ -187,6 +240,41 @@ export default function linkChecker(opts = {}) {
             if (!ok) broken.push({ href: norm, sources: [...sources].sort() });
           })
         );
+
+        // Phase 4: check anchor fragments against the id sets of their target pages.
+        if (checkAnchors && fragmentMap.size > 0) {
+          await Promise.all(
+            [...fragmentMap.entries()].map(async ([targetPath, fragMap]) => {
+              // Skip anchor checking for pages that don't exist (already reported as broken).
+              if (!(await checkExists(targetPath, buildDir))) return;
+
+              // idCache keys have no trailing slash; normalize the lookup.
+              const idKey = targetPath !== '/' && targetPath.endsWith('/')
+                ? targetPath.slice(0, -1)
+                : targetPath;
+              let ids = idCache.get(idKey);
+
+              if (!ids) {
+                // Page exists but wasn't crawled (e.g. excluded source page) — read it now.
+                const base = join(buildDir, targetPath.replace(/^\//, ''));
+                for (const p of [base + '.html', join(base, 'index.html'), base]) {
+                  try { ids = extractIds(await readFile(p, 'utf-8')); break; }
+                  catch { /* try next */ }
+                }
+                if (!ids) return;
+              }
+
+              for (const [fragment, sources] of fragMap.entries()) {
+                if (ids.has(fragment)) {
+                  if (verbose) log(`[link-checker] ✓ ${targetPath}#${fragment}`);
+                } else {
+                  if (verbose) log(`[link-checker] ✗ ${targetPath}#${fragment}`);
+                  broken.push({ href: `${targetPath}#${fragment}`, sources: [...sources].sort() });
+                }
+              }
+            })
+          );
+        }
 
         const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
         log(`[link-checker] done in ${elapsed}s`);
@@ -207,7 +295,7 @@ export default function linkChecker(opts = {}) {
 
         const msg = `[link-checker] ${broken.length} broken link${broken.length === 1 ? '' : 's'}:\n${report}`;
         log(msg);
-        if (failOnBrokenLinks) process.exit(1);
+        if (failOnBrokenLinks) throw new Error(msg);
       },
     },
   };
