@@ -162,6 +162,128 @@ async function checkExists(norm, buildDir) {
   return plain || html || idx;
 }
 
+// Walk a directory for .md/.mdx files.
+async function walkMarkdown(dir, extensions) {
+  let entries;
+  try { entries = await readdir(dir, { withFileTypes: true }); }
+  catch { return []; }
+  const parts = await Promise.all(
+    entries.map(e => {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) return walkMarkdown(p, extensions);
+      return extensions.some(ext => e.name.endsWith(ext)) ? [p] : [];
+    })
+  );
+  return parts.flat();
+}
+
+// Replace code and non-prose regions with whitespace so they can't produce false positives.
+function stripNonContentRegions(text) {
+  const blank = m => m.replace(/[^\n]/g, ' ');
+  // Frontmatter (--- block at start of file)
+  text = text.replace(/^\s*---\n[\s\S]*?\n---\n?/, blank);
+  // Fenced code blocks (backtick and tilde fences; \1 matches the opening fence length)
+  text = text.replace(/^(`{3,})[^\n]*\n[\s\S]*?\n\1[ \t]*$/gm, blank);
+  text = text.replace(/^(~{3,})[^\n]*\n[\s\S]*?\n\1[ \t]*$/gm, blank);
+  // Inline code spans (single or double backticks; no newlines inside)
+  text = text.replace(/`+[^`\n]+`+/g, blank);
+  // HTML/MDX comments (preserve newlines for correct line numbers)
+  text = text.replace(/<!--[\s\S]*?-->/g, m => '\n'.repeat((m.match(/\n/g) ?? []).length));
+  // MDX import/export lines
+  text = text.replace(/^[ \t]*(import|export)\b[^\n]*/gm, blank);
+  // JSX/HTML string attribute values to avoid false positives in prop strings
+  text = text.replace(/=["'][^"'\n]*["']/g, blank);
+  return text;
+}
+
+// Detect malformed markdown link syntax. Returns { file, line, col, text, kind }[].
+//
+// Pattern 1 — [TEXT(URL): missing ] before (.
+//   [^\[\]()\n]+ excludes brackets and parens from the "link text" portion, so a
+//   normal [text](url) never matches: the ] terminates the char class before ( is reached.
+//   The (?!\s*]) negative lookahead rejects the valid [text (/foo)](real-url) form where
+//   a URL-like string appears inside the link text itself.
+//
+// Pattern 2 — [TEXT] (URL): whitespace between ] and (.
+//   The first char of the bracket content excludes ^ (footnote refs) so [^id] is safe.
+//   Requires the paren content to start with a URL-like pattern; this prevents task list
+//   items [x] (description) and ordinary parentheticals from triggering.
+function findMalformedLinks(text, filePath) {
+  const issues = [];
+  const content = stripNonContentRegions(text);
+  const lines = content.split('\n');
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const lineNo = i + 1;
+    let m;
+
+    const reMissingClose = /\[[^\[\]()\n]+\((?:https?:\/\/|[./])[^)\n]*\)(?!\s*])/g;
+    while ((m = reMissingClose.exec(line)) !== null)
+      issues.push({ file: filePath, line: lineNo, col: m.index + 1, text: m[0], kind: 'missing-close-bracket' });
+
+    const reSpaceParen = /\[[^\[\]^][^\[\]]*\][ \t]+\((?:https?:\/\/|[./])[^)\n]*\)/g;
+    while ((m = reSpaceParen.exec(line)) !== null)
+      issues.push({ file: filePath, line: lineNo, col: m.index + 1, text: m[0], kind: 'space-before-href' });
+  }
+
+  return issues;
+}
+
+export function markdownLinkSyntaxChecker(opts = {}) {
+  const {
+    excludePaths = [],
+    failOnIssues = true,
+    extensions   = ['.md', '.mdx'],
+    _exit        = process.exit,
+  } = opts;
+
+  let srcDir = '';
+
+  return {
+    name: 'astro-markdown-link-syntax-checker',
+    hooks: {
+      'astro:config:done': ({ config }) => {
+        srcDir = config.srcDir instanceof URL
+          ? fileURLToPath(config.srcDir)
+          : String(config.srcDir);
+      },
+      'astro:build:done': async ({ logger }) => {
+        if (!srcDir) return;
+        const log = msg => (logger ? logger.info(msg) : console.log(msg));
+        const pool = makePool(50);
+
+        const files = await walkMarkdown(srcDir, extensions);
+        log(`[md-link-syntax] checking ${files.length} markdown files`);
+
+        const allIssues = [];
+        await Promise.all(
+          files.map(file =>
+            pool(async () => {
+              const relPath = relative(srcDir, file);
+              if (matches(relPath, excludePaths)) return;
+              const text = await readFile(file, 'utf-8');
+              allIssues.push(...findMalformedLinks(text, relPath));
+            })
+          )
+        );
+
+        if (allIssues.length === 0) {
+          log('[md-link-syntax] no issues found');
+          return;
+        }
+
+        allIssues.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
+        const report = allIssues
+          .map(({ file, line, col, text, kind }) => `  ${file}:${line}:${col}  [${kind}]  ${text}`)
+          .join('\n');
+        log(`[md-link-syntax] ${allIssues.length} issue${allIssues.length === 1 ? '' : 's'}:\n${report}`);
+        if (failOnIssues) _exit(1);
+      },
+    },
+  };
+}
+
 export default function linkChecker(opts = {}) {
   const {
     excludeSourcePages  = [],

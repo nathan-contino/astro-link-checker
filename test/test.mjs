@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
-import linkChecker from '../index.mjs';
+import linkChecker, { markdownLinkSyntaxChecker } from '../index.mjs';
 
 // Build a minimal HTML page with a given list of hrefs.
 const page = (...hrefs) =>
@@ -405,4 +405,145 @@ test('verbose mode → logs anchor checks', async () => {
     const anchorLogs = r.logs.filter(l => (l.includes('✓') || l.includes('✗')) && l.includes('#'));
     assert.ok(anchorLogs.length > 0, 'verbose mode should log anchor checks');
   } finally { await rm(tmp, { recursive: true }); }
+});
+
+// ── markdown link syntax checker tests ──────────────────────────────────────
+
+// Helper: run markdownLinkSyntaxChecker over a set of in-memory source files.
+async function runMd(files, opts = {}) {
+  const tmp = await mkdtemp(join(tmpdir(), 'alc-md-test-'));
+  for (const [rel, content] of Object.entries(files)) {
+    const abs = join(tmp, rel);
+    await mkdir(dirname(abs), { recursive: true });
+    await writeFile(abs, content, 'utf-8');
+  }
+  const logs = [];
+  const integration = markdownLinkSyntaxChecker({
+    failOnIssues: false,
+    ...opts,
+    _exit: () => { throw new Error(logs[logs.length - 1] ?? 'exit'); },
+  });
+  const logger = { info: msg => logs.push(msg) };
+  // Fire config:done to set srcDir, then build:done to scan files.
+  await integration.hooks['astro:config:done']({ config: { srcDir: pathToFileURL(tmp + '/') } });
+  let threw = null;
+  try { await integration.hooks['astro:build:done']({ logger }); }
+  catch (e) { threw = e; }
+  await rm(tmp, { recursive: true });
+  return { logs, threw };
+}
+
+const hasIssue = (r, kind) => r.logs.some(l => l.includes(kind));
+const noIssues = r => r.logs.some(l => l.includes('no issues found'));
+
+test('md-syntax: [text(url)] — missing ] before ( — detected', async () => {
+  const r = await runMd({ 'page.mdx': '[click here](/docs/foo) is fine but [broken link(/docs/bar) is not\n' });
+  assert.ok(hasIssue(r, 'missing-close-bracket'), 'should detect missing ]');
+  assert.ok(!r.logs.some(l => l.includes('[click here]')), 'valid link should not be reported');
+});
+
+test('md-syntax: [text](url) — normal link — not flagged', async () => {
+  const r = await runMd({ 'page.mdx': '[click here](/docs/foo)\n[another](https://example.com)\n' });
+  assert.ok(noIssues(r), 'normal links should not be flagged');
+});
+
+test('md-syntax: [text] (url) — space before paren — detected', async () => {
+  const r = await runMd({ 'page.mdx': '[click here] (/docs/foo)\n' });
+  assert.ok(hasIssue(r, 'space-before-href'), 'should detect space before href');
+});
+
+test('md-syntax: [text] (url) with multiple spaces — detected', async () => {
+  const r = await runMd({ 'page.mdx': '[link text]   (/docs/page)\n' });
+  assert.ok(hasIssue(r, 'space-before-href'));
+});
+
+test('md-syntax: content in fenced code block — not flagged', async () => {
+  const r = await runMd({ 'page.mdx': '```\n[broken link(/docs/foo)\n[text] (/docs/bar)\n```\n' });
+  assert.ok(noIssues(r), 'malformed patterns inside code blocks should not be flagged');
+});
+
+test('md-syntax: content in inline code span — not flagged', async () => {
+  const r = await runMd({ 'page.mdx': 'Use `[text(/url)]` as an example\n' });
+  assert.ok(noIssues(r), 'inline code content should not be flagged');
+});
+
+test('md-syntax: frontmatter — not scanned', async () => {
+  const r = await runMd({ 'page.mdx': '---\ntitle: "[broken(/docs/foo)"\n---\n# Heading\n' });
+  assert.ok(noIssues(r), 'frontmatter values should not be flagged');
+});
+
+test('md-syntax: task list item [x] (note) — not flagged', async () => {
+  const r = await runMd({ 'page.mdx': '- [x] (task done)\n- [ ] (pending task)\n' });
+  assert.ok(noIssues(r), 'task list items should not be flagged (parens do not contain URL-like content)');
+});
+
+test('md-syntax: footnote ref [^id] — not flagged', async () => {
+  const r = await runMd({ 'page.mdx': 'See [^1] for details.\n\n[^1]: /reference\n' });
+  assert.ok(noIssues(r), 'footnote references should not be flagged');
+});
+
+test('md-syntax: reference-style link [text][ref-id] — not flagged', async () => {
+  const r = await runMd({ 'page.mdx': '[click here][docs-link]\n\n[docs-link]: /docs/foo\n' });
+  assert.ok(noIssues(r), 'reference-style links should not be flagged');
+});
+
+test('md-syntax: MDX import line — not scanned', async () => {
+  const r = await runMd({ 'page.mdx': "import Foo from '[broken(/docs)'\n# Content\n" });
+  assert.ok(noIssues(r), 'import lines should not be flagged');
+});
+
+test('md-syntax: JSX string attribute — not flagged', async () => {
+  const r = await runMd({ 'page.mdx': '<Component href="[broken(/docs)" />\n' });
+  assert.ok(noIssues(r), 'JSX string attribute values should not be flagged');
+});
+
+test('md-syntax: HTML comment — not scanned', async () => {
+  const r = await runMd({ 'page.mdx': '<!-- [broken link(/docs/foo)] -->\n# Real content\n' });
+  assert.ok(noIssues(r), 'HTML comment content should not be flagged');
+});
+
+test('md-syntax: link text with non-URL parenthetical — not flagged', async () => {
+  // [text (note)](url) is a valid link with parenthetical in link text; (note) does not
+  // start with a URL-like character, so Pattern 1 does not match.
+  const r = await runMd({ 'page.mdx': '[FusionAuth (auth server)](/docs/get-started)\n' });
+  assert.ok(noIssues(r), 'parenthetical in link text without URL-like content should not be flagged');
+});
+
+test('md-syntax: valid link with URL in link text — not flagged', async () => {
+  // [text (/foo)](real-url) — URL in link text but real href exists; negative lookahead skips it.
+  const r = await runMd({ 'page.mdx': '[visit /docs/foo for details](/docs/foo)\n' });
+  assert.ok(noIssues(r), 'valid link with path-like content in link text should not be flagged');
+});
+
+test('md-syntax: failOnIssues: true — throws', async () => {
+  const r = await runMd({ 'page.mdx': '[broken(/docs/foo)\n' }, { failOnIssues: true });
+  assert.ok(r.threw instanceof Error, 'expected error on issue when failOnIssues is true');
+});
+
+test('md-syntax: multiple files — all scanned, issues aggregated', async () => {
+  const r = await runMd({
+    'a.mdx': '[broken link(/docs/a)\n',
+    'b.md':  '[also broken](/docs/b) is fine but [bad] (/docs/c) is not\n',
+  });
+  const report = r.logs.join('\n');
+  assert.ok(report.includes('missing-close-bracket'), 'should find issue in first file');
+  assert.ok(report.includes('space-before-href'), 'should find issue in second file');
+});
+
+test('md-syntax: excludePaths — excluded files not scanned', async () => {
+  const r = await runMd(
+    { 'skip/page.mdx': '[broken(/docs/foo)\n', 'keep/page.mdx': '# clean\n' },
+    { excludePaths: ['skip/'] },
+  );
+  assert.ok(noIssues(r), 'excluded path should not be scanned');
+});
+
+test('md-syntax: tilde fenced code block — not flagged', async () => {
+  const r = await runMd({ 'page.mdx': '~~~\n[broken link(/docs/foo)\n~~~\n' });
+  assert.ok(noIssues(r), 'malformed patterns inside tilde fenced blocks should not be flagged');
+});
+
+test('md-syntax: https:// url in malformed link — detected', async () => {
+  const r = await runMd({ 'page.mdx': '[click here(https://example.com/page)\n' });
+  assert.ok(hasIssue(r, 'missing-close-bracket'), 'should detect missing ] with https URL');
 });
