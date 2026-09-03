@@ -1,18 +1,19 @@
 /**
  * astro-link-checker
  *
- * Fast intra-site broken link and anchor checker for Astro. Runs after build.
+ * Fast intra-site broken link, anchor, and image checker for Astro. Runs after build.
  *
  * Algorithm:
  *   1. Walk the build output directory in parallel to collect all .html files.
- *   2. Read all files concurrently; extract href attributes and id attributes.
+ *   2. Read all files concurrently; extract href, img src/srcset attributes, and id attributes.
  *   3. Build linkMap<normalizedPath, Set<sourceUrl>>,
+ *      imageMap<normalizedPath, Set<sourceUrl>>,
  *      fragmentMap<targetUrlPath, Map<fragment, Set<sourceUrl>>>,
  *      and idCache<urlPath, Set<id>>.
- *      A destination linked from 500 pages is stat'd exactly once.
+ *      A destination linked or referenced from 500 pages is stat'd exactly once.
  *   4. Check all unique path destinations in parallel with fs.access.
  *   5. Check all anchor fragments against idCache.
- *   6. Report broken links and anchors grouped by destination.
+ *   6. Report broken links, images, and anchors grouped by destination.
  *
  * External links are not checked. Use a dedicated HTTP checker for those.
  *
@@ -28,7 +29,8 @@
  *   excludeDestinations   {(string|RegExp)[]}  skip destinations whose path matches
  *   failOnBrokenLinks     {boolean}            throw on any broken link (default: true)
  *   checkAnchors          {boolean}            validate #fragment targets (default: true)
- *   verbose               {boolean}            log every checked href (default: false)
+ *   checkImages           {boolean}            validate img src/srcset paths (default: true)
+ *   verbose               {boolean}            log every checked href/src (default: false)
  */
 
 import { readdir, readFile, access } from 'node:fs/promises';
@@ -94,6 +96,28 @@ function extractHrefs(html) {
   let m;
   while ((m = re.exec(stripped)) !== null) hrefs.push(m[2]);
   return hrefs;
+}
+
+// Extract image src and srcset URLs from HTML.
+function extractSrcs(html) {
+  const stripped = html
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '');
+  const srcs = [];
+  let m;
+  // img, source, video, audio src=
+  const reSrc = /<(?:img|source|video|audio)\b[^>]*?\bsrc=(["'])([^"']{1,2048}?)\1/gi;
+  while ((m = reSrc.exec(stripped)) !== null) srcs.push(m[2]);
+  // srcset= on any element (comma-separated "url descriptor" pairs)
+  const reSrcset = /\bsrcset=(["'])([^"']{1,4096}?)\1/gi;
+  while ((m = reSrcset.exec(stripped)) !== null) {
+    for (const part of m[2].split(',')) {
+      const url = part.trim().split(/\s+/)[0];
+      if (url) srcs.push(url);
+    }
+  }
+  return srcs;
 }
 
 // Extract all id attribute values and legacy <a name="..."> anchors from HTML.
@@ -290,6 +314,7 @@ export default function linkChecker(opts = {}) {
     excludeDestinations = [],
     failOnBrokenLinks   = true,
     checkAnchors        = true,
+    checkImages         = true,
     verbose             = false,
     _exit               = process.exit,
   } = opts;
@@ -306,11 +331,13 @@ export default function linkChecker(opts = {}) {
         const htmlFiles = await walkHtml(buildDir);
         log(`[link-checker] ${htmlFiles.length} HTML files`);
 
-        // Phase 2: extract hrefs, fragments, and ids across all pages.
+        // Phase 2: extract hrefs, img srcs, fragments, and ids across all pages.
         // linkMap:     normPath    → Set<sourceUrlPath>
+        // imageMap:    normPath    → Set<sourceUrlPath>
         // fragmentMap: targetPath  → Map<fragment, Set<sourceUrlPath>>
         // idCache:     urlPath     → Set<id>
         const linkMap     = new Map();
+        const imageMap    = new Map();
         const fragmentMap = new Map();
         const idCache     = new Map();
         const pool = makePool(200);
@@ -348,22 +375,39 @@ export default function linkChecker(opts = {}) {
                   fragSources.add(urlPath);
                 }
               }
+
+              if (checkImages) {
+                for (const raw of extractSrcs(html)) {
+                  const result = normalizeHref(raw, file, buildDir);
+                  if (!result) continue;
+                  const { path: normPath } = result;
+                  if (!normPath) continue;
+                  if (matches(normPath, excludeDestinations)) continue;
+                  let sources = imageMap.get(normPath);
+                  if (!sources) { sources = new Set(); imageMap.set(normPath, sources); }
+                  sources.add(urlPath);
+                }
+              }
             })
           )
         );
 
-        const uniqueCount = linkMap.size;
-        log(`[link-checker] ${uniqueCount} unique destinations`);
+        log(`[link-checker] ${linkMap.size} unique link destinations, ${imageMap.size} unique image paths`);
 
         // Phase 3: check every unique path destination exactly once.
         const broken = [];
-        await Promise.all(
-          [...linkMap.entries()].map(async ([norm, sources]) => {
+        await Promise.all([
+          ...[...linkMap.entries()].map(async ([norm, sources]) => {
             const ok = await checkExists(norm, buildDir);
             if (verbose) log(`[link-checker] ${ok ? '✓' : '✗'} ${norm}`);
             if (!ok) broken.push({ href: norm, sources: [...sources].sort() });
-          })
-        );
+          }),
+          ...[...imageMap.entries()].map(async ([norm, sources]) => {
+            const ok = await checkExists(norm, buildDir);
+            if (verbose) log(`[link-checker] ${ok ? '✓' : '✗'} img ${norm}`);
+            if (!ok) broken.push({ href: norm, sources: [...sources].sort(), image: true });
+          }),
+        ]);
 
         // Phase 4: check anchor fragments against the id sets of their target pages.
         if (checkAnchors && fragmentMap.size > 0) {
@@ -410,14 +454,21 @@ export default function linkChecker(opts = {}) {
 
         broken.sort((a, b) => a.href.localeCompare(b.href));
         const report = broken
-          .map(({ href, sources }) => {
+          .map(({ href, sources, image }) => {
+            const label = image ? `img ${href}` : href;
             const shown = sources.slice(0, 5).join('\n    ');
             const more = sources.length > 5 ? `\n    … and ${sources.length - 5} more` : '';
-            return `  ${href}\n    ${shown}${more}`;
+            return `  ${label}\n    ${shown}${more}`;
           })
           .join('\n');
 
-        const msg = `[link-checker] ${broken.length} broken link${broken.length === 1 ? '' : 's'}:\n${report}`;
+        const brokenLinks = broken.filter(b => !b.image).length;
+        const brokenImages = broken.filter(b => b.image).length;
+        const summary = [
+          brokenLinks  && `${brokenLinks} broken link${brokenLinks === 1 ? '' : 's'}`,
+          brokenImages && `${brokenImages} broken image${brokenImages === 1 ? '' : 's'}`,
+        ].filter(Boolean).join(', ');
+        const msg = `[link-checker] ${summary}:\n${report}`;
         log(msg);
         if (failOnBrokenLinks) _exit(1);
       },

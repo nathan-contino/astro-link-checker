@@ -1,8 +1,8 @@
 {
   "name": "astro-link-checker",
-  "version": "0.3.2",
+  "version": "1.0.0",
   "type": "module",
-  "description": "Fast intra-site broken link checker for Astro — deduplicates destinations and checks each one exactly once",
+  "description": "Fast intra-site broken link and image checker for Astro — deduplicates destinations and checks each one exactly once",
   "author": "Nathan Contino <ncontino@lambdalatitudinarians.org>",
   "license": "MIT",
   "keywords": ["astro", "astro-integration", "link-checker", "broken-links"],
