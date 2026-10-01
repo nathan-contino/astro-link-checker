@@ -1,4 +1,4 @@
-# astro-link-checker
+# astro-better-link-checker
 
 Fast intra-site broken link checker for Astro. Runs after `astro build` and reports any `href` values that don't resolve to a real file in the build output.
 
@@ -11,7 +11,7 @@ The common approach checks links per-file: if `/docs/get-started` is linked from
 ## Installation
 
 ```shell-session
-npm install astro-link-checker
+npm install astro-better-link-checker
 ```
 
 ## Usage
@@ -19,7 +19,7 @@ npm install astro-link-checker
 ```ts
 // astro.config.ts
 import { defineConfig } from 'astro/config';
-import linkChecker from 'astro-link-checker';
+import linkChecker from 'astro-better-link-checker';
 
 export default defineConfig({
   integrations: [linkChecker()],

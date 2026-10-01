@@ -1,5 +1,5 @@
 /**
- * astro-link-checker
+ * astro-better-link-checker
  *
  * Fast intra-site broken link, anchor, and image checker for Astro. Runs after build.
  *
@@ -19,7 +19,7 @@
  *
  * Usage (astro.config.ts):
  *
- *   import linkChecker from 'astro-link-checker';
+ *   import linkChecker from 'astro-better-link-checker';
  *   export default defineConfig({
  *     integrations: [linkChecker()],
  *   });
@@ -320,7 +320,7 @@ export default function linkChecker(opts = {}) {
   } = opts;
 
   return {
-    name: 'astro-link-checker',
+    name: 'astro-better-link-checker',
     hooks: {
       'astro:build:done': async ({ dir, logger }) => {
         const t0 = Date.now();

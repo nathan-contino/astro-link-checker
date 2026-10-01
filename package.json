@@ -1,18 +1,34 @@
 {
-  "name": "astro-link-checker",
+  "name": "astro-better-link-checker",
   "version": "1.0.0",
-  "type": "module",
   "description": "Fast intra-site broken link and image checker for Astro — deduplicates destinations and checks each one exactly once",
-  "author": "Nathan Contino <ncontino@lambdalatitudinarians.org>",
+  "keywords": [
+    "astro",
+    "astro-integration",
+    "link-checker",
+    "broken-links"
+  ],
   "license": "MIT",
-  "keywords": ["astro", "astro-integration", "link-checker", "broken-links"],
-  "scripts": {
-    "test": "node --test test/test.mjs"
+  "author": "Nathan Contino <ncontino@lambdalatitudinarians.org>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/better-static-sites/better-static-sites.github.io.git",
+    "directory": "astro-better-link-checker"
   },
+  "homepage": "https://better-static-sites.github.io",
+  "bugs": {
+    "url": "https://github.com/better-static-sites/better-static-sites.github.io/issues"
+  },
+  "type": "module",
   "exports": {
     ".": "./index.mjs"
   },
-  "files": ["index.mjs"],
+  "files": [
+    "index.mjs"
+  ],
+  "scripts": {
+    "test": "node --test test/test.mjs"
+  },
   "peerDependencies": {
     "astro": ">=4.0.0"
   }
